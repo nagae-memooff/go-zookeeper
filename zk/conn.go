@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	log "github.com/nagae-memooff/log4go"
 	"io"
 	"net"
 	"strconv"
@@ -32,7 +33,7 @@ var ErrNoServer = errors.New("zk: could not connect to a server")
 var ErrInvalidPath = errors.New("zk: invalid path")
 
 // DefaultLogger uses the stdlib log package for logging.
-var DefaultLogger Logger = defaultLogger{}
+var Log log.Logger
 
 const (
 	bufferSize      = 1536 * 1024
@@ -98,8 +99,6 @@ type Conn struct {
 
 	// Debug (used by unit tests)
 	reconnectDelay time.Duration
-
-	logger Logger
 
 	buf []byte
 }
@@ -196,7 +195,6 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 		requests:       make(map[int32]*request),
 		watchers:       make(map[watchPathType][]chan Event),
 		passwd:         emptyPassword,
-		logger:         DefaultLogger,
 		buf:            make([]byte, bufferSize),
 
 		// Debug
@@ -268,12 +266,6 @@ func (c *Conn) SessionID() int64 {
 	return atomic.LoadInt64(&c.sessionID)
 }
 
-// SetLogger sets the logger to be used for printing errors.
-// Logger is an interface provided by this package.
-func (c *Conn) SetLogger(l Logger) {
-	c.logger = l
-}
-
 func (c *Conn) setTimeouts(sessionTimeoutMs int32) {
 	c.sessionTimeoutMs = sessionTimeoutMs
 	sessionTimeout := time.Duration(sessionTimeoutMs) * time.Millisecond
@@ -321,11 +313,15 @@ func (c *Conn) connect() error {
 		if err == nil {
 			c.conn = zkConn
 			c.setState(StateConnected)
-			c.logger.Printf("Connected to %s", c.Server())
+			Log.Debugc(func() string {
+				return fmt.Sprintf("Connected to %s", c.Server())
+			})
 			return nil
 		}
 
-		c.logger.Printf("Failed to connect to %s: %+v", c.Server(), err)
+		Log.Errorc(func() string {
+			return fmt.Sprintf("Failed to connect to %s: %+v", c.Server(), err)
+		})
 	}
 }
 
@@ -335,8 +331,9 @@ func (c *Conn) resendZkAuth(reauthReadyChan chan struct{}) {
 
 	defer close(reauthReadyChan)
 
-	c.logger.Printf("Re-submitting `%d` credentials after reconnect",
-		len(c.creds))
+	Log.Debugc(func() string {
+		return fmt.Sprintf("Re-submitting `%d` credentials after reconnect", len(c.creds))
+	})
 
 	for _, cred := range c.creds {
 		resChan, err := c.sendRequest(
@@ -349,14 +346,18 @@ func (c *Conn) resendZkAuth(reauthReadyChan chan struct{}) {
 			nil)
 
 		if err != nil {
-			c.logger.Printf("Call to sendRequest failed during credential resubmit: %s", err)
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Call to sendRequest failed during credential resubmit: %s", err)
+			})
 			// FIXME(prozlach): lets ignore errors for now
 			continue
 		}
 
 		res := <-resChan
 		if res.err != nil {
-			c.logger.Printf("Credential re-submit failed: %s", res.err)
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Credential re-submit failed: %s", res.err)
+			})
 			// FIXME(prozlach): lets ignore errors for now
 			continue
 		}
@@ -398,13 +399,19 @@ func (c *Conn) loop() {
 		err := c.authenticate()
 		switch {
 		case err == ErrSessionExpired:
-			c.logger.Printf("Authentication failed: %s", err)
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Authentication failed: %s", err)
+			})
 			c.invalidateWatches(err)
 		case err != nil && c.conn != nil:
-			c.logger.Printf("Authentication failed: %s", err)
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Authentication failed: %s", err)
+			})
 			c.conn.Close()
 		case err == nil:
-			c.logger.Printf("Authenticated: id=%d, timeout=%d", c.SessionID(), c.sessionTimeoutMs)
+			Log.Debugc(func() string {
+				return fmt.Sprintf("Authenticated: id=%d, timeout=%d", c.SessionID(), c.sessionTimeoutMs)
+			})
 			c.hostProvider.Connected()        // mark success
 			c.closeChan = make(chan struct{}) // channel to tell send loop stop
 			reauthChan := make(chan struct{}) // channel to tell send loop that authdata has been resubmitted
@@ -414,7 +421,11 @@ func (c *Conn) loop() {
 			go func() {
 				<-reauthChan
 				err := c.sendLoop()
-				c.logger.Printf("Send loop terminated: err=%v", err)
+				if err != nil && err != io.EOF {
+					Log.Errorc(func() string {
+						return fmt.Sprintf("Send loop terminated: err=%v", err)
+					})
+				}
 				c.conn.Close() // causes recv loop to EOF/exit
 				wg.Done()
 			}()
@@ -422,7 +433,11 @@ func (c *Conn) loop() {
 			wg.Add(1)
 			go func() {
 				err := c.recvLoop(c.conn)
-				c.logger.Printf("Recv loop terminated: err=%v", err)
+				if err != nil && err != io.EOF {
+					Log.Errorc(func() string {
+						return fmt.Sprintf("Recv loop terminated: err=%v", err)
+					})
+				}
 				if err == nil {
 					panic("zk: recvLoop should never return nil error")
 				}
@@ -535,7 +550,9 @@ func (c *Conn) sendSetWatches() {
 		res := &setWatchesResponse{}
 		_, err := c.request(opSetWatches, req, res, nil)
 		if err != nil {
-			c.logger.Printf("Failed to set previous watches: %s", err.Error())
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Failed to set previous watches: %s", err.Error())
+			})
 		}
 	}()
 }
@@ -739,7 +756,9 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 		} else if res.Xid == -2 {
 			// Ping response. Ignore.
 		} else if res.Xid < 0 {
-			c.logger.Printf("Xid < 0 (%d) but not ping or watcher event", res.Xid)
+			Log.Errorc(func() string {
+				return fmt.Sprintf("Xid < 0 (%d) but not ping or watcher event", res.Xid)
+			})
 		} else {
 			if res.Zxid > 0 {
 				c.lastZxid = res.Zxid
@@ -753,7 +772,9 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 			c.requestsLock.Unlock()
 
 			if !ok {
-				c.logger.Printf("Response for unknown request with xid %d", res.Xid)
+				Log.Errorc(func() string {
+					return fmt.Sprintf("Response for unknown request with xid %d", res.Xid)
+				})
 			} else {
 				if res.Err != 0 {
 					err = res.Err.toError()
