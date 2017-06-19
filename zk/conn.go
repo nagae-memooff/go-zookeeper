@@ -313,7 +313,7 @@ func (c *Conn) connect() error {
 		if err == nil {
 			c.conn = zkConn
 			c.setState(StateConnected)
-			Log.Debugc(func() string {
+			Log.Infoc(func() string {
 				return fmt.Sprintf("Connected to %s", c.Server())
 			})
 			return nil
@@ -346,18 +346,14 @@ func (c *Conn) resendZkAuth(reauthReadyChan chan struct{}) {
 			nil)
 
 		if err != nil {
-			Log.Errorc(func() string {
-				return fmt.Sprintf("Call to sendRequest failed during credential resubmit: %s", err)
-			})
+			Log.Error("Call to sendRequest failed during credential resubmit: %s", err)
 			// FIXME(prozlach): lets ignore errors for now
 			continue
 		}
 
 		res := <-resChan
 		if res.err != nil {
-			Log.Errorc(func() string {
-				return fmt.Sprintf("Credential re-submit failed: %s", res.err)
-			})
+			Log.Error("Credential re-submit failed: %s", res.err)
 			// FIXME(prozlach): lets ignore errors for now
 			continue
 		}
@@ -399,14 +395,10 @@ func (c *Conn) loop() {
 		err := c.authenticate()
 		switch {
 		case err == ErrSessionExpired:
-			Log.Errorc(func() string {
-				return fmt.Sprintf("Authentication failed: %s", err)
-			})
+			Log.Error("Authentication failed: %s", err)
 			c.invalidateWatches(err)
 		case err != nil && c.conn != nil:
-			Log.Errorc(func() string {
-				return fmt.Sprintf("Authentication failed: %s", err)
-			})
+			Log.Error("Authentication failed: %s", err)
 			c.conn.Close()
 		case err == nil:
 			Log.Debugc(func() string {
@@ -422,9 +414,7 @@ func (c *Conn) loop() {
 				<-reauthChan
 				err := c.sendLoop()
 				if err != nil && err != io.EOF {
-					Log.Errorc(func() string {
-						return fmt.Sprintf("Send loop terminated: err=%v", err)
-					})
+					Log.Error("Send loop terminated: err=%v", err)
 				}
 				c.conn.Close() // causes recv loop to EOF/exit
 				wg.Done()
@@ -434,9 +424,7 @@ func (c *Conn) loop() {
 			go func() {
 				err := c.recvLoop(c.conn)
 				if err != nil && err != io.EOF {
-					Log.Errorc(func() string {
-						return fmt.Sprintf("Recv loop terminated: err=%v", err)
-					})
+					Log.Error("Recv loop terminated: err=%v", err)
 				}
 				if err == nil {
 					panic("zk: recvLoop should never return nil error")
@@ -756,9 +744,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 		} else if res.Xid == -2 {
 			// Ping response. Ignore.
 		} else if res.Xid < 0 {
-			Log.Errorc(func() string {
-				return fmt.Sprintf("Xid < 0 (%d) but not ping or watcher event", res.Xid)
-			})
+			Log.Error("Xid < 0 (%d) but not ping or watcher event", res.Xid)
 		} else {
 			if res.Zxid > 0 {
 				c.lastZxid = res.Zxid
@@ -772,9 +758,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 			c.requestsLock.Unlock()
 
 			if !ok {
-				Log.Errorc(func() string {
-					return fmt.Sprintf("Response for unknown request with xid %d", res.Xid)
-				})
+				Log.Error("Response for unknown request with xid %d", res.Xid)
 			} else {
 				if res.Err != 0 {
 					err = res.Err.toError()
